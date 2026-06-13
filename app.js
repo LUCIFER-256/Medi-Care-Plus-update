@@ -1,347 +1,258 @@
-/**
- * MEDICARE PLUS OPERATIONAL ENTERPRISE SYSTEM - CORE SCRIPT
- * Updated: Tax/VAT logic removed.
- * Updated: Drug List dynamically bound to live Google Sheets API (8 Column Array Schema)
- */
+const LOCAL_STORAGE_KEY = "MEDICARE_ENTERPRISE_DB";
 
-// Live System Cache State
-let db = { 
+const BASE_EMPTY_STATE = {
   drugs: [], 
-  batches: [], 
-  suppliers: [], 
-  customers: [], 
-  expenses: [], 
-  procurements: [], 
-  sales: [] 
+  batches: [],
+  suppliers: [],
+  customers: [
+    { name: "Joint Medical Store Ltd", type: "Wholesale" },
+    { name: "National Medical Stores (NMS)", type: "Wholesale" }
+  ],
+  expenses: [],
+  sales: []
 };
 
-const API_URL = 'https://script.google.com/macros/s/AKfycbydlhN1Hv12CJz8hFJFDNj2uKOQU_xyc65sOzNDNhQELInmc76V1EKWVIhJLrXPQWhf4A/exec';
+let db = {};
+
+function saveLocalState() {
+  localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(db));
+}
+
+function loadLocalState() {
+  const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
+  if (!cached) {
+    db = JSON.parse(JSON.stringify(BASE_EMPTY_STATE));
+    saveLocalState();
+  } else {
+    db = JSON.parse(cached);
+  }
+}
+
 let retailCart = {};
 let wholesaleCart = {};
+let activeStaffPin = sessionStorage.getItem("medi_staff_pin") || null;
 
-// Secure PIN Store (Using sessionStorage so it clears cleanly on tab close)
-let currentStaffPin = sessionStorage.getItem('medi_staff_pin') || "";
-let currentStaffRole = "";
-
-const STAFF_ROLES_LOCAL = {
-  "8899": { name: "Dr. Lucifer", role: "Administrator", avatar: "DL" },
-  "4422": { name: "Alex Namanya", role: "Pharmacist Cashier", avatar: "AN" }
-};
-
-// Currency Formatter Helper
-function fmt(val) { 
-  return 'UGX ' + Math.round(val).toLocaleString('en-UG'); 
+function fmt(num) {
+  return "UGX " + Number(num).toLocaleString('en-US');
 }
 
-// Compute aggregate medicine totals across active batch lots
-function getStock(medName) {
-  if (!medName) return 0;
-  return db.batches
-    .filter(b => b.medName === medName)
-    .reduce((acc, curr) => acc + curr.stock, 0);
+function getStock(medIdentifier) {
+  return db.batches.filter(b => b.medName === medIdentifier).reduce((acc, curr) => acc + Number(curr.stock), 0);
 }
 
-// Security Enforcement Module (Restores your functional layout boundaries)
-function enforceSecurityClearance() {
-  const staff = STAFF_ROLES_LOCAL[currentStaffPin];
+function checkAdminClearance() {
+  if (activeStaffPin === "8899") return true;
+  const challenge = prompt("🔒 SECURITY WINDOW: ENTER SECURE ADMIN TERMINAL PIN:");
+  if (challenge === "8899") {
+    activeStaffPin = "8899";
+    sessionStorage.setItem("medi_staff_pin", "8899");
+    return true;
+  }
+  alert("❌ Access Denied: Invalid PIN.");
+  return false;
+}
+
+function handleNavigationClick(targetButton) {
+  const targetId = targetButton.getAttribute('data-target');
+  if (!targetId) return;
+
+  document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+  document.querySelectorAll('.tab-view').forEach(v => v.style.display = 'none');
   
-  if (!staff) {
-    document.getElementById('staff-name').textContent = "Authentication Required";
-    document.getElementById('staff-role').textContent = "ACCESS RESTRICTED";
-    document.getElementById('staff-role').style.color = "#d9534f";
-    document.getElementById('staff-avatar').textContent = "??";
-    currentStaffRole = "";
-    
-    // Safety fallback to active retail terminal if auth drops
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    const initialNav = document.querySelector('[data-target="pos-retail"]');
-    if (initialNav) initialNav.classList.add('active');
-    
-    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-    const initialSec = document.getElementById('pos-retail');
-    if (initialSec) initialSec.classList.add('active');
-    
-    document.getElementById('page-title').textContent = "POS Retail Terminal";
-    
-    promptStaffLoginAndBuild();
+  targetButton.classList.add('active');
+  const targetView = document.getElementById(targetId);
+  if (targetView) {
+    targetView.style.display = 'block';
+  }
+}
+
+// REGISTER INDEPENDENT UI BUTTON INTERCEPTORS
+function initInterceptors() {
+  document.querySelectorAll('.nav-link').forEach(btn => {
+    btn.onclick = function(e) {
+      e.preventDefault();
+      handleNavigationClick(this);
+    };
+  });
+
+  const lockBtn = document.getElementById('btn-lock-terminal');
+  if (lockBtn) {
+    lockBtn.onclick = function(e) {
+      e.preventDefault();
+      activeStaffPin = null;
+      sessionStorage.removeItem("medi_staff_pin");
+      alert("🔒 Terminal admin token cleared.");
+    };
+  }
+
+  const mDrug = document.getElementById('btn-modal-drug');
+  if (mDrug) mDrug.onclick = function() { if(checkAdminClearance()) openDrugModal(); };
+
+  const mProc = document.getElementById('btn-modal-proc');
+  if (mProc) mProc.onclick = function() { if(checkAdminClearance()) openProcurementModal(); };
+
+  const mSup = document.getElementById('btn-modal-supplier');
+  if (mSup) mSup.onclick = function() { if(checkAdminClearance()) openSupplierModal(); };
+
+  const mExp = document.getElementById('btn-modal-expense');
+  if (mExp) mExp.onclick = function() { if(checkAdminClearance()) openExpenseModal(); };
+
+  const checkRet = document.getElementById('btn-checkout-retail');
+  if (checkRet) checkRet.onclick = function() { finalizeTransaction('retail'); };
+
+  const checkWholesale = document.getElementById('btn-checkout-wholesale');
+  if (checkWholesale) checkWholesale.onclick = function() { finalizeTransaction('wholesale'); };
+  
+  const rSearch = document.getElementById('retail-search');
+  if (rSearch) rSearch.oninput = function() { renderPosGrids(this.value, 'retail'); };
+  
+  const wSearch = document.getElementById('wholesale-search');
+  if (wSearch) wSearch.oninput = function() { renderPosGrids(this.value, 'wholesale'); };
+}
+
+function buildMasterTables() {
+  const sHistory = document.getElementById('sales-history-tbody');
+  if (sHistory) {
+    sHistory.innerHTML = db.sales.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:var(--muted);">No sales recorded.</td></tr>' : 
+    db.sales.map(s => `<tr><td><b>${s.receipt}</b></td><td>${s.time}</td><td>${s.customer}</td><td>${s.itemCount} Units</td><td><b>${fmt(s.total)}</b></td><td><span class="pill ${s.type === 'Retail' ? 'green' : 'amber'}">${s.type}</span></td></tr>`).reverse().join('');
+  }
+
+  const sReport = document.getElementById('stock-report-tbody');
+  if (sReport) {
+    sReport.innerHTML = db.drugs.length === 0 ? '<tr><td colspan="7" style="text-align:center;color:var(--muted);">No drugs found.</td></tr>' : 
+    db.drugs.map((d, i) => `<tr><td>${i+1}</td><td><b>${d.brandName}</b></td><td>${d.genericName}</td><td><span class="badge">${d.category}</span></td><td>${fmt(d.costPrice)}</td><td>${fmt(d.wholesalePrice)}</td><td class="text-success font-bold">${fmt(d.retailPrice)}</td></tr>`).join('');
+  }
+
+  const expiryT = document.getElementById('expiry-tbody');
+  if (expiryT) {
+    expiryT.innerHTML = db.batches.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No tracked batches.</td></tr>' : 
+    db.batches.map(b => `<tr><td>${b.medName}</td><td><code>${b.lot}</code></td><td><b>${b.stock} units</b></td><td>${b.expiry}</td><td><span class="pill green">Active</span></td></tr>`).join('');
+  }
+
+  const auditT = document.getElementById('audit-tbody');
+  if (auditT) {
+    auditT.innerHTML = db.drugs.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No items to audit.</td></tr>' : 
+    db.drugs.map(d => `<tr><td>${d.brandName}</td><td><code>${getStock(d.brandName)} units</code></td><td><input type="number" class="form-control physical-input" data-name="${d.brandName}" placeholder="Count" style="width:100px;"></td><td id="var-${d.brandName.replace(/\s+/g, '-')}">--</td><td><button class="action-btn btn-reconcile" data-name="${d.brandName}">Match</button></td></tr>`).join('');
+    attachAuditTriggers();
+  }
+
+  const supT = document.getElementById('suppliers-tbody');
+  if (supT) {
+    supT.innerHTML = db.suppliers.length === 0 ? '<tr><td colspan="4" style="text-align:center;color:var(--muted);">No suppliers registered.</td></tr>' : 
+    db.suppliers.map(s => `<tr><td><b>${s.name}</b></td><td>${s.contact}</td><td>${s.phone}</td><td>${s.location}</td></tr>`).join('');
+  }
+
+  const expT = document.getElementById('expenditures-tbody');
+  if (expT) {
+    expT.innerHTML = db.expenses.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No expenses filed.</td></tr>' : 
+    db.expenses.map(e => `<tr><td>${e.date}</td><td>${e.desc}</td><td><span class="pill amber">${e.category}</span></td><td><b>${fmt(e.amount)}</b></td><td>Admin</td></tr>`).join('');
+  }
+
+  const cSel = document.getElementById('wholesale-client-select');
+  if (cSel) cSel.innerHTML = db.customers.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+}
+
+function renderPosGrids(q = '', type = 'retail') {
+  const container = document.getElementById(type === 'retail' ? 'retail-drug-grid' : 'wholesale-drug-grid');
+  if (!container) return;
+  const filtered = db.drugs.filter(d => d.brandName.toLowerCase().includes(q.toLowerCase()));
+  if (filtered.length === 0) {
+    container.innerHTML = `<div style="padding:20px;color:var(--muted);font-size:12px;">No products match query.</div>`;
+    return;
+  }
+  container.innerHTML = filtered.map(d => `
+    <div class="drug-card" data-name="${d.brandName}" data-type="${type}">
+      <div><b>${d.brandName}</b><br><small style="color:var(--muted);">${d.genericName}</small></div>
+      <div style="color:var(--sage);font-weight:bold;margin-top:8px;">${fmt(type==='retail'?d.retailPrice:d.wholesalePrice)}</div>
+      <div style="font-size:11px;color:var(--muted);">Stock: ${getStock(d.brandName)} u</div>
+    </div>
+  `).join('');
+
+  container.querySelectorAll('.drug-card').forEach(card => {
+    card.onclick = function() {
+      addItemToCart(this.dataset.name, this.dataset.type);
+    };
+  });
+}
+
+function addItemToCart(name, type) {
+  const cart = type === 'retail' ? retailCart : wholesaleCart;
+  if (getStock(name) <= (cart[name] || 0)) return alert("Out of physical inventory bounds.");
+  cart[name] = (cart[name] || 0) + 1;
+  syncCartView(type);
+}
+
+function adjustQty(name, type, delta) {
+  const cart = type === 'retail' ? retailCart : wholesaleCart;
+  cart[name] += delta;
+  if (cart[name] <= 0) delete cart[name];
+  syncCartView(type);
+}
+
+function syncCartView(type) {
+  const cart = type === 'retail' ? retailCart : wholesaleCart;
+  const container = document.getElementById(type === 'retail' ? 'retail-cart-items' : 'wholesale-cart-items');
+  const totalEl = document.getElementById(type === 'retail' ? 'retail-total' : 'wholesale-total');
+  const subEl = document.getElementById(type === 'retail' ? 'retail-subtotal' : 'wholesale-subtotal');
+  
+  const keys = Object.keys(cart);
+  if (!keys.length) {
+    container.innerHTML = `<div style="text-align:center;padding:20px;color:var(--muted);">Basket clear.</div>`;
+    if(totalEl) totalEl.textContent = fmt(0); 
+    if(subEl) subEl.textContent = fmt(0);
     return;
   }
 
-  document.getElementById('staff-name').textContent = staff.name;
-  document.getElementById('staff-role').textContent = staff.role;
-  document.getElementById('staff-role').style.color = staff.role === "Administrator" ? "var(--sage)" : "var(--muted)";
-  document.getElementById('staff-avatar').textContent = staff.avatar;
-  currentStaffRole = staff.role;
-
-  const isAdmin = (staff.role === "Administrator");
-  
-  // Toggle Admin Restricted Actions
-  $('#open-medicine-modal-btn').toggle(isAdmin);
-  $('#open-procurement-modal-btn').toggle(isAdmin);
-  $('#open-expense-modal-btn').toggle(isAdmin);
-  $('.reconcile-trigger-btn').toggle(isAdmin);
-  
-  $('#nav-expenditures').toggle(isAdmin);
-  $('#nav-stock-count').toggle(isAdmin);
-}
-
-// Fetch live dataset from Google Apps Script deployment URL
-async function refreshApplicationState() {
-  try {
-    const response = await fetch(API_URL);
-    if (!response.ok) throw new Error("Spreadsheet engine lookup failure.");
-    
-    let serverState = await response.json();
-    console.log("📡 Live Data Retrieved:", serverState);
-    
-    if (serverState && typeof serverState === 'object' && !Array.isArray(serverState)) {
-      db.drugs = serverState.drugs || [];
-      db.batches = serverState.batches || [];
-      db.sales = serverState.sales || [];
-      db.expenses = serverState.expenses || [];
-      db.suppliers = serverState.suppliers || [];
-      db.customers = serverState.customers || [];
-      db.procurements = serverState.procurements || [];
-    } else if (Array.isArray(serverState)) {
-      db.drugs = serverState;
-    }
-
-    // Normalize name strings across active caching rows
-    db.drugs = db.drugs.map(d => {
-      const activeName = d.brandName || d.name || "Unknown SKU Variant";
-      return { ...d, name: activeName, brandName: activeName };
-    });
-
-  } catch (error) {
-    console.error("Critical Spreadsheet Engine Connection Interrupted:", error);
-  }
-}
-
-// Re-calculate dashboard KPI cards
-function evaluateApplicationStates() {
-  const totalSalesVal = db.sales.reduce((acc, curr) => acc + (curr.total || 0), 0);
-
-  document.getElementById('kpi-sales-val').textContent = fmt(totalSalesVal);
-  document.getElementById('kpi-tx-count').textContent = db.sales.length + " Core Transactions";
-  
-  let expiringCount = 0;
-  const sixtyDaysHence = new Date();
-  sixtyDaysHence.setDate(new Date().getDate() + 60);
-
-  let alertRowsHtml = '';
-  db.batches.forEach(b => {
-    const expDate = new Date(b.expiry);
-    if (expDate <= sixtyDaysHence && b.stock > 0) {
-      expiringCount++;
-      alertRowsHtml += `<tr><td>${b.medName} (${b.lot})</td><td><span class="pill red">Expires ${b.expiry}</span></td></tr>`;
-    }
-  });
-  document.getElementById('kpi-exp-count').textContent = `${expiringCount} Lots`;
-  document.getElementById('global-alert-badge').textContent = `${expiringCount} Alerts`;
-
-  let lowStockCount = 0;
-  let stockSummaryHtml = '';
-  
-  db.drugs.forEach(d => {
-    const medIdentifier = d.name || d.brandName;
-    const totalQty = getStock(medIdentifier);
-    let pillClass = 'green';
-    let label = 'Healthy Balance';
-    
-    if (totalQty <= 15) {
-      lowStockCount++;
-      pillClass = 'red';
-      label = 'Critically Low';
-      alertRowsHtml += `<tr><td>${medIdentifier}</td><td><span class="pill amber">Stock: ${totalQty}</span></td></tr>`;
-    } else if (totalQty <= 50) {
-      pillClass = 'amber';
-      label = 'Reorder Alert';
-    }
-    stockSummaryHtml += `<tr><td>${medIdentifier}</td><td><b>${totalQty} units</b></td><td><span class="pill ${pillClass}">${label}</span></td></tr>`;
-  });
-  
-  document.getElementById('kpi-low-stock').textContent = `${lowStockCount} Variants`;
-  document.getElementById('dash-stock-summary').innerHTML = stockSummaryHtml || '<tr><td colspan="3">Registry clean.</td></tr>';
-  document.getElementById('dash-alerts-summary').innerHTML = alertRowsHtml || '<tr><td colspan="2">No systemic errors registered.</td></tr>';
-}
-
-// Build grid elements for terminal tabs
-function renderPosGrids(searchQuery = '', type = 'retail') {
-  const targetGrid = type === 'retail' ? 'retail-drug-grid' : 'wholesale-drug-grid';
-  const filtered = db.drugs.filter(d => {
-    const matchTarget = d.name || d.brandName || '';
-    return matchTarget.toLowerCase().includes(searchQuery.toLowerCase());
-  });
-  
-  document.getElementById(targetGrid).innerHTML = filtered.map(d => {
-    const medIdentifier = d.name || d.brandName;
-    const currentStock = getStock(medIdentifier);
-    const rxPill = d.rxRequired ? '<span class="pill red" style="font-size:8px;margin-top:2px;display:inline-block;">NDA Rx Lock</span>' : '';
-    const displayedPrice = type === 'retail' ? (d.retailPrice || d.price || 0) : (d.wholesalePrice || d.price || 0);
-    return `
-      <div class="drug-card" data-name="${medIdentifier}" data-type="${type}">
-        <div class="drug-name">${medIdentifier} ${rxPill}</div>
-        <div class="drug-price">${fmt(displayedPrice)}</div>
-        <div class="drug-stock">Available: ${currentStock} units</div>
-      </div>
-    `;
+  let total = 0;
+  container.innerHTML = keys.map(k => {
+    const d = db.drugs.find(i => i.brandName === k);
+    const price = type === 'retail' ? d.retailPrice : d.wholesalePrice;
+    total += price * cart[k];
+    return `<div class="cart-item"><span>${k}</span><div class="cart-qty"><button class="min-q" data-name="${k}">-</button><b>${cart[k]}</b><button class="add-q" data-name="${k}">+</button></div><span>${fmt(price*cart[k])}</span></div>`;
   }).join('');
-}
-
-// Update Cart View - Scrubbed completely of tax/VAT calculations
-function updateCartView(cart, containerId, subtotalId, taxId, totalId, discountId = null) {
-  const container = document.getElementById(containerId);
-  const itemKeys = Object.keys(cart);
-
-  if (!itemKeys.length) {
-    container.innerHTML = `<div style="text-align:center;padding:40px 0;color:var(--muted);font-size:12px">No items added to configuration.</div>`;
-    document.getElementById(subtotalId).textContent = fmt(0);
-    document.getElementById(totalId).textContent = fmt(0);
-    return;
-  }
-
-  let grossTotal = 0;
-  container.innerHTML = itemKeys.map(name => {
-    const d = db.drugs.find(item => item.name === name || item.brandName === name) || { price: 0 };
-    const qty = cart[name];
-    const activePrice = containerId.includes('wholesale') ? (d.wholesalePrice || d.price || 0) : (d.retailPrice || d.price || 0);
-    const itemTotal = activePrice * qty;
-    grossTotal += itemTotal;
-    return `
-      <div class="cart-item">
-        <span class="cart-item-name">${name}</span>
-        <div class="cart-qty">
-          <button class="qty-btn dec-btn" data-name="${name}" data-container="${containerId}">-</button>
-          <span style="font-size:12px;font-weight:700;width:20px;text-align:center">${qty}</span>
-          <button class="qty-btn inc-btn" data-name="${name}" data-container="${containerId}">+</button>
-        </div>
-        <span class="cart-line">${fmt(itemTotal)}</span>
-      </div>
-    `;
-  }).join('');
-
-  // direct flat pricing maps (Taxation-free)
-  document.getElementById(subtotalId).textContent = fmt(grossTotal);
-  document.getElementById(totalId).textContent = fmt(grossTotal);
   
-  evaluatePrescriptionRequirements();
+  container.querySelectorAll('.min-q').forEach(b => b.onclick = function() { adjustQty(this.dataset.name, type, -1); });
+  container.querySelectorAll('.add-q').forEach(b => b.onclick = function() { adjustQty(this.dataset.name, type, 1); });
+
+  if(totalEl) totalEl.textContent = fmt(total);
+  if(subEl) subEl.textContent = fmt(total);
 }
 
-function handlePosSelection(name, type) {
-  const targetCart = type === 'retail' ? retailCart : wholesaleCart;
-  const totalAvailableStock = getStock(name);
-  const theoreticalQty = (targetCart[name] || 0) + 1;
+function finalizeTransaction(type) {
+  const cart = type === 'retail' ? retailCart : wholesaleCart;
+  const keys = Object.keys(cart);
+  if (!keys.length) return alert("Cart is empty.");
 
-  if (theoreticalQty > totalAvailableStock) {
-    alert(`Operational Halt: Ordered volume exceeds absolute warehouse balance.`);
-    return;
-  }
-
-  targetCart[name] = theoreticalQty;
-  if (type === 'retail') {
-    updateCartView(retailCart, 'retail-cart-items', 'retail-subtotal', 'retail-tax', 'retail-total');
-  } else {
-    updateCartView(wholesaleCart, 'wholesale-cart-items', 'wholesale-subtotal', 'wholesale-tax', 'wholesale-total', 'wholesale-discount');
-  }
-}
-
-function evaluatePrescriptionRequirements() {
-  let retailRequiresRx = Object.keys(retailCart).some(name => db.drugs.find(d => d.name === name || d.brandName === name)?.rxRequired);
-  let wholesaleRequiresRx = Object.keys(wholesaleCart).some(name => db.drugs.find(d => d.name === name || d.brandName === name)?.rxRequired);
-
-  if(document.getElementById('retail-rx-gate')) document.getElementById('retail-rx-gate').classList.toggle('hidden', !retailRequiresRx);
-  if(document.getElementById('wholesale-rx-gate')) document.getElementById('wholesale-rx-gate').classList.toggle('hidden', !wholesaleRequiresRx);
-}
-
-async function executeRetailSale() {
-  const keys = Object.keys(retailCart);
-  if (!keys.length) return alert('Transaction initialization failed: Cart contains no items.');
-
-  const requiresRx = keys.some(name => db.drugs.find(d => d.name === name || d.brandName === name)?.rxRequired);
-  if (requiresRx) {
-    const doc = document.getElementById('retail-rx-doctor').value.trim();
-    const pat = document.getElementById('retail-rx-patient').value.trim();
-    if (!doc || !pat) return alert('NDA Compliance Error: Controlled substance validation fields missing.');
-  }
-
-  let totalNet = 0;
-  keys.forEach(k => { 
-    const d = db.drugs.find(item => item.name === k || item.brandName === k);
-    const activePrice = d ? (d.retailPrice || d.price || 0) : 0;
-    totalNet += activePrice * retailCart[k]; 
+  let total = 0; let count = 0;
+  keys.forEach(k => {
+    const d = db.drugs.find(i => i.brandName === k);
+    total += (type === 'retail' ? d.retailPrice : d.wholesalePrice) * cart[k];
+    count += cart[k];
+    let rem = cart[k];
+    for (let b of db.batches) {
+      if (b.medName === k && b.stock > 0) {
+        if (b.stock >= rem) { b.stock -= rem; rem = 0; break; }
+        else { rem -= b.stock; b.stock = 0; }
+      }
+    }
   });
 
-  try {
-    await fetch(API_URL, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'sale', cart: retailCart, client: 'Walk-in Consumer Account', type: 'Retail', total: totalNet })
-    });
+  const txData = { 
+    receipt: "TX-"+Math.floor(100000+Math.random()*900000), 
+    time: new Date().toLocaleString(), 
+    customer: type === 'retail'?'Walk-in Client':(document.getElementById('wholesale-client-select')?.value || 'Wholesale Client'), 
+    itemCount: count, 
+    total: total, 
+    type: type==='retail'?'Retail':'Wholesale',
+    cartDetails: { ...cart }
+  };
 
-    spoolHardwareReceipt({
-      receipt: 'TX-' + Math.floor(1000 + Math.random() * 9000),
-      time: new Date().toLocaleTimeString('en-UG') + ' ' + new Date().toLocaleDateString('en-UG'),
-      type: 'Retail',
-      customer: 'Walk-in Consumer Account',
-      cartDetails: retailCart,
-      total: totalNet
-    });
-
-    retailCart = {};
-    if(document.getElementById('retail-rx-doctor')) document.getElementById('retail-rx-doctor').value = '';
-    if(document.getElementById('retail-rx-patient')) document.getElementById('retail-rx-patient').value = '';
-    updateCartView(retailCart, 'retail-cart-items', 'retail-subtotal', 'retail-tax', 'retail-total');
-    alert('Retail Transaction Sent to Spreadsheet.');
-    await loadAndBuildSystemInterface();
-  } catch (error) {
-    alert("Database sync fault encountered during checkout routing pipeline execution.");
-  }
-}
-
-async function executeWholesaleSale() {
-  const keys = Object.keys(wholesaleCart);
-  if (!keys.length) return alert('Transaction initialization failed: Cart contains no items.');
-
-  const client = document.getElementById('wholesale-client-select').value;
-  const requiresRx = keys.some(name => db.drugs.find(d => d.name === name || d.brandName === name)?.rxRequired);
-  if (requiresRx) {
-    const lic = document.getElementById('wholesale-rx-license').value.trim();
-    if (!lic) return alert('Regulatory Alert: Valid facility license must be provided.');
-  }
-
-  let totalNet = 0;
-  keys.forEach(k => { 
-    const d = db.drugs.find(item => item.name === k || item.brandName === k);
-    const activePrice = d ? (d.wholesalePrice || d.price || 0) : 0;
-    totalNet += activePrice * wholesaleCart[k]; 
-  });
-
-  try {
-    await fetch(API_URL, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'sale', cart: wholesaleCart, client: client, type: 'Wholesale', total: totalNet })
-    });
-
-    spoolHardwareReceipt({
-      receipt: 'WS-' + Math.floor(1000 + Math.random() * 9000),
-      time: new Date().toLocaleTimeString('en-UG') + ' ' + new Date().toLocaleDateString('en-UG'),
-      type: 'Wholesale',
-      customer: client,
-      cartDetails: wholesaleCart,
-      total: totalNet
-    });
-
-    wholesaleCart = {};
-    if(document.getElementById('wholesale-rx-license')) document.getElementById('wholesale-rx-license').value = '';
-    updateCartView(wholesaleCart, 'wholesale-cart-items', 'wholesale-subtotal', 'wholesale-tax', 'wholesale-total', 'wholesale-discount');
-    alert('Wholesale Transaction Sent to Spreadsheet.');
-    await loadAndBuildSystemInterface();
-  } catch (error) {
-    alert("Wholesale server distribution routing failure.");
-  }
+  db.sales.push(txData);
+  saveLocalState();
+  if (type === 'retail') { retailCart = {}; syncCartView('retail'); } else { wholesaleCart = {}; syncCartView('wholesale'); }
+  
+  spoolHardwareReceipt(txData);
+  evaluateSystemMetrics(); buildMasterTables(); renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale');
 }
 
 function spoolHardwareReceipt(tx) {
@@ -349,389 +260,123 @@ function spoolHardwareReceipt(tx) {
   if (!printContainer) {
     printContainer = document.createElement('div');
     printContainer.id = 'receipt-hardware-spooler';
-    printContainer.className = 'receipt-print-wrapper';
+    printContainer.style.display = 'none';
     document.body.appendChild(printContainer);
   }
 
-  let itemsHtml = '';
-  for (const name in tx.cartDetails) {
+  let linesHtml = "";
+  for (let name in tx.cartDetails) {
     const qty = tx.cartDetails[name];
-    const itemData = db.drugs.find(d => d.name === name || d.brandName === name) || { price: 0 };
-    const activePrice = tx.type === 'Wholesale' ? (itemData.wholesalePrice || itemData.price || 0) : (itemData.retailPrice || itemData.price || 0);
-    itemsHtml += `
-      <tr>
-        <td style="padding: 4px 0;">${name}<br><small>${qty} x ${fmt(activePrice)}</small></td>
-        <td style="text-align: right; vertical-align: bottom; padding: 4px 0;">${fmt(activePrice * qty)}</td>
-      </tr>
-    `;
+    const d = db.drugs.find(item => item.brandName === name);
+    const basePrice = tx.type === 'Retail' ? d.retailPrice : d.wholesalePrice;
+    linesHtml += `<tr><td>${name} (${qty}x)</td><td style="text-align:right;">${fmt(basePrice * qty)}</td></tr>`;
   }
 
   printContainer.innerHTML = `
-    <div class="receipt-header" style="text-align: center; font-family: monospace;">
-      <h2>MEDICARE PLUS</h2>
-      <p style="font-size: 11px; margin-top: 4px;">Kampala, Uganda</p>
-    </div>
-    <hr style="border-top: 1px dashed #000; margin: 10px 0;">
-    <table style="width: 100%; font-size: 11px; font-family: monospace; margin-bottom: 8px;">
-      <tr><td>Receipt ID: <b>${tx.receipt}</b></td><td style="text-align: right;">Type: ${tx.type}</td></tr>
-      <tr><td>Date: ${tx.time}</td><td style="text-align: right;">User: Secure Agent</td></tr>
-      <tr><td colspan="2" style="padding-top: 4px;">Account: ${tx.customer}</td></tr>
-    </table>
-    <hr style="border-top: 1px dashed #000; margin: 10px 0;">
-    <table style="width: 100%; font-size: 11px; font-family: monospace;">
-      <thead>
-        <tr style="border-bottom: 1px dashed #000;"><th style="text-align: left; padding-bottom: 4px;">Item Line Summary</th><th style="text-align: right; padding-bottom: 4px;">Total</th></tr>
-      </thead>
-      <tbody>
-        ${itemsHtml}
-      </tbody>
-    </table>
-    <hr style="border-top: 1px dashed #000; margin: 10px 0;">
-    <table style="width: 100%; font-size: 13px; font-weight: bold; font-family: monospace; margin-top: 5px;">
-      <tr><td>TOTAL FLAT NET AMOUNT:</td><td style="text-align: right;">${fmt(tx.total)}</td></tr>
-    </table>
-    <hr style="border-top: 1px dashed #000; margin: 10px 0;">
-    <div style="text-align: center; margin-top: 15px; font-size: 11px; font-family: monospace;">
-      <p>Thank you for choosing Medicare Plus.</p>
+    <div style="font-family:monospace;padding:20px;color:#000;">
+      <h3 style="text-align:center;">MEDICARE PLUS</h3>
+      <hr>
+      <p>ID: ${tx.receipt}</p>
+      <p>Date: ${tx.time}</p>
+      <table style="width:100%;">${linesHtml}</table>
+      <hr>
+      <h4>Total Paid: ${fmt(tx.total)}</h4>
     </div>
   `;
-
   window.print();
 }
 
-// Master Table Ingestion and Construction Engine
-function buildMasterTables() {
-  document.getElementById('sales-history-tbody').innerHTML = db.sales.map(s => `
-    <tr>
-      <td><b>${s.receipt || 'N/A'}</b></td>
-      <td>${s.time || 'N/A'}</td>
-      <td>${s.customer || 'Walk-in'}</td>
-      <td>Items count: ${s.items || 0} units</td>
-      <td>No Tax (Direct)</td>
-      <td><b>${fmt(s.total || 0)}</b></td>
-      <td><span class="pill ${s.type === 'Retail' ? 'green' : 'amber'}">${s.type || 'Retail'}</span></td>
-    </tr>
-  `).join('');
+function evaluateSystemMetrics() {
+  const turnoverEl = document.getElementById('kpi-turnover');
+  const txCountEl = document.getElementById('kpi-tx-count');
+  const expCountEl = document.getElementById('kpi-expiry-count');
+  const varCountEl = document.getElementById('kpi-variance-count');
 
-  // Renders your exact 8 parameters scheme live from Google Sheets
-  document.getElementById('stock-report-tbody').innerHTML = db.drugs.map((d, index) => `
-    <tr>
-      <td class="text-muted font-mono">${d.sno || (index + 1)}</td>
-      <td><b>${d.brandName || d.name || 'Unnamed SKU'}</b></td>
-      <td>${d.genericName || 'N/A'}</td>
-      <td><span class="badge">${d.type || d.category || 'Tablets'}</span></td>
-      <td>${fmt(d.costPrice || 0)}</td>
-      <td>${fmt(d.wholesalePrice || 0)}</td>
-      <td class="text-success font-bold">${fmt(d.retailPrice || d.price || 0)}</td>
-    </tr>
-  `).join('');
-
-  document.getElementById('expiry-tbody').innerHTML = db.batches.map(b => {
-    const deltaDays = Math.ceil((new Date(b.expiry) - new Date()) / (1000 * 60 * 60 * 24));
-    let statusPill = `<span class="pill green">${deltaDays} days remaining</span>`;
-    if (deltaDays <= 30) statusPill = `<span class="pill red">NDA Hazard (${deltaDays} Days)</span>`;
-    else if (deltaDays <= 60) statusPill = `<span class="pill amber">Warning Horizon</span>`;
-    return `<tr><td>${b.medName || 'N/A'}</td><td><code>${b.lot || 'N/A'}</code></td><td><b>${b.stock || 0} units</b></td><td>${b.expiry || 'N/A'}</td><td>${statusPill}</td></tr>`;
-  }).join('');
-
-  document.getElementById('audit-tbody').innerHTML = db.drugs.map(d => {
-    const medIdentifier = d.name || d.brandName || 'Unnamed SKU';
-    const currentBalance = getStock(medIdentifier);
-    return `
-      <tr>
-        <td>${medIdentifier}</td>
-        <td><code>${currentBalance} units</code></td>
-        <td><input type="number" class="form-control physical-input" data-name="${medIdentifier}" placeholder="Enter counter match" style="width:140px"></td>
-        <td class="variance-cell" data-name="${medIdentifier}">--</td>
-        <td><button class="action-btn reconcile-trigger-btn" data-name="${medIdentifier}">Reconcile</button></td>
-      </tr>
-    `;
-  }).join('');
-
-  document.getElementById('suppliers-tbody').innerHTML = db.suppliers.map(s => `
-    <tr><td><b>${s.name || 'N/A'}</b></td><td>${s.contact || 'N/A'}</td><td>${s.phone || 'N/A'}</td><td>${s.location || 'N/A'}</td></tr>
-  `).join('');
-
-  document.getElementById('expenditures-tbody').innerHTML = db.expenses.map(e => `
-    <tr><td>${e.date || 'N/A'}</td><td>${e.desc || 'N/A'}</td><td><span class="pill amber">${e.category || 'General'}</span></td><td><b>${fmt(e.amount || 0)}</b></td><td><code>${e.user || 'Admin'}</code></td></tr>
-  `).join('');
-
-  // Option lists synchronization
-  if (document.getElementById('wholesale-client-select')) {
-    document.getElementById('wholesale-client-select').innerHTML = db.customers.filter(c => c.type === 'Wholesale').map(c => `<option value="${c.name}">${c.name}</option>`).join('') || '<option value="">No corporate accounts</option>';
-  }
-  if (document.getElementById('modal-proc-supplier')) {
-    document.getElementById('modal-proc-supplier').innerHTML = db.suppliers.map(s => `<option value="${s.name}">${s.name}</option>`).join('') || '<option value="">No suppliers configured</option>';
-  }
-  if (document.getElementById('modal-proc-med')) {
-    document.getElementById('modal-proc-med').innerHTML = db.drugs.map(d => `<option value="${d.name || d.brandName}">${d.name || d.brandName}</option>`).join('') || '<option value="">No options available</option>';
-  }
-  
-  enforceSecurityClearance(); 
+  if(turnoverEl) turnoverEl.textContent = fmt(db.sales.reduce((a,c)=>a+c.total,0));
+  if(txCountEl) txCountEl.textContent = `${db.sales.length} Transactions`;
+  if(expCountEl) expCountEl.textContent = `${db.batches.filter(b=>b.stock>0).length} Lots`;
+  if(varCountEl) varCountEl.textContent = `${db.drugs.filter(d=>getStock(d.brandName)===0).length} Out of Stock`;
 }
 
-// Bind global operational actions and events
-document.addEventListener('DOMContentLoaded', () => {
-  
-  // Tab Routing View Dispatcher
-  document.querySelectorAll('.nav-item').forEach(item => {
-    item.addEventListener('click', function() {
-      const targetSection = this.getAttribute('data-target');
-      document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-      document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-      
-      document.getElementById(targetSection).classList.add('active');
-      this.classList.add('active');
-      document.getElementById('page-title').textContent = this.textContent.trim();
-    });
-  });
+const containerModal = document.getElementById('modal-container');
+const boxModal = document.getElementById('modal-box');
+window.closeModal = function() { containerModal.style.display = 'none'; };
 
-  document.getElementById('retail-search').addEventListener('input', (e) => renderPosGrids(e.target.value, 'retail'));
-  document.getElementById('wholesale-search').addEventListener('input', (e) => renderPosGrids(e.target.value, 'wholesale'));
-
-  document.getElementById('retail-drug-grid').addEventListener('click', (e) => {
-    const card = e.target.closest('.drug-card');
-    if (card) handlePosSelection(card.dataset.name, 'retail');
-  });
-  document.getElementById('wholesale-drug-grid').addEventListener('click', (e) => {
-    const card = e.target.closest('.drug-card');
-    if (card) handlePosSelection(card.dataset.name, 'wholesale');
-  });
-
-  const bindCartDelegation = (elementId, cartObj, subId, taxId, totId, discId = null) => {
-    document.getElementById(elementId).addEventListener('click', (e) => {
-      const btn = e.target.closest('.qty-btn');
-      if (!btn) return;
-      const name = btn.dataset.name;
-      
-      if (btn.classList.contains('inc-btn')) {
-        const currentStock = getStock(name);
-        if ((cartObj[name] || 0) + 1 > currentStock) {
-          alert('Operational Warning: Safety threshold reached. Insufficient stock.');
-          return;
-        }
-        cartObj[name]++;
-      } else if (btn.classList.contains('dec-btn')) {
-        cartObj[name]--;
-        if (cartObj[name] <= 0) delete cartObj[name];
-      }
-      updateCartView(cartObj, elementId, subId, taxId, totId, discId);
-    });
+function openDrugModal() {
+  boxModal.innerHTML = `<div class="modal-header"><h4>+ Add Variant SKU</h4><button onclick="closeModal()">×</button></div><form id="f-drug"><div class="form-group"><label>Brand Name</label><input type="text" id="m-brand" class="form-control" required></div><div class="form-group"><label>Generic Name</label><input type="text" id="m-generic" class="form-control" required></div><div class="form-group"><label>Category</label><select id="m-cat" class="form-control"><option>Tablets</option><option>Syrup</option></select></div><div class="form-group"><label>Cost Price</label><input type="number" id="m-cost" class="form-control" required></div><div class="form-group"><label>Wholesale Price</label><input type="number" id="m-wholesale" class="form-control" required></div><div class="form-group"><label>Retail Price</label><input type="number" id="m-retail" class="form-control" required></div><button type="submit" class="checkout-submit-btn">SAVE</button></form>`;
+  containerModal.style.display = 'flex';
+  document.getElementById('f-drug').onsubmit = function(e) {
+    e.preventDefault();
+    db.drugs.push({ brandName: document.getElementById('m-brand').value.trim(), genericName: document.getElementById('m-generic').value.trim(), category: document.getElementById('m-cat').value, costPrice: Number(document.getElementById('m-cost').value), wholesalePrice: Number(document.getElementById('m-wholesale').value), retailPrice: Number(document.getElementById('m-retail').value) });
+    saveLocalState(); closeModal(); buildMasterTables(); renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale'); evaluateSystemMetrics();
   };
-  bindCartDelegation('retail-cart-items', retailCart, 'retail-subtotal', 'retail-tax', 'retail-total');
-  bindCartDelegation('wholesale-cart-items', wholesaleCart, 'wholesale-subtotal', 'wholesale-tax', 'wholesale-total', 'wholesale-discount');
+}
 
-  document.getElementById('retail-pay-btn').addEventListener('click', executeRetailSale);
-  document.getElementById('wholesale-pay-btn').addEventListener('click', executeWholesaleSale);
-
-  const toggleModal = (modalId, open) => document.getElementById(modalId).classList.toggle('hidden', !open);
-  document.getElementById('open-medicine-modal-btn').addEventListener('click', () => toggleModal('medicine-modal', true));
-  document.getElementById('close-med-modal').addEventListener('click', () => toggleModal('medicine-modal', false));
-  document.getElementById('open-expense-modal-btn').addEventListener('click', () => toggleModal('expense-modal', true));
-  document.getElementById('close-exp-modal').addEventListener('click', () => toggleModal('expense-modal', false));
-  document.getElementById('open-procurement-modal-btn').addEventListener('click', () => toggleModal('procurement-modal', true));
-  document.getElementById('close-proc-modal').addEventListener('click', () => toggleModal('procurement-modal', false));
-
-document.getElementById('save-med-modal').addEventListener('click', async () => {
-  const inputName = document.getElementById('modal-med-name').value.trim();
-  const category = document.getElementById('modal-med-cat').value.trim();
-  const price = parseInt(document.getElementById('modal-med-price').value);
-  const barcode = document.getElementById('modal-med-barcode').value.trim();
-  const genericName = document.getElementById('modal-med-generic')?.value.trim() || "Generic SKU";
-
-  // 1. Corrected Validation Guard (Removed the broken trailing comma)
-  if (!inputName || !category || isNaN(price)) {
-    return alert('Field Validation Failure: Please check that Name, Category and Price are populated correctly.');
-  }
-
-  // 2. Construct the clean local data object 
-  const newDrug = {
-    sno: (db.drugs ? db.drugs.length + 1 : 1),
-    name: inputName,
-    brandName: inputName,
-    genericName: genericName,
-    category: category,
-    type: category,
-    costPrice: 0,
-    wholesalePrice: 0,
-    retailPrice: price,
-    price: price,
-    barcode: barcode,
-    rxRequired: document.getElementById('modal-med-rx')?.value === 'true'
+function openProcurementModal() {
+  boxModal.innerHTML = `<div class="modal-header"><h4>+ Record Supply Consignment</h4><button onclick="closeModal()">×</button></div><form id="f-batch"><div class="form-group"><label>Select Variant</label><select id="b-name" class="form-control">${db.drugs.map(d=>`<option value="${d.brandName}">${d.brandName}</option>`).join('')}</select></div><div class="form-group"><label>Lot Code</label><input type="text" id="b-lot" class="form-control" required></div><div class="form-group"><label>Quantity</label><input type="number" id="b-stock" class="form-control" required></div><div class="form-group"><label>Expiry Date</label><input type="date" id="b-expiry" class="form-control" required></div><button type="submit" class="checkout-submit-btn">LOG BATCH</button></form>`;
+  containerModal.style.display = 'flex';
+  document.getElementById('f-batch').onsubmit = function(e) {
+    e.preventDefault();
+    db.batches.push({ medName: document.getElementById('b-name').value, lot: document.getElementById('b-lot').value.trim(), stock: Number(document.getElementById('b-stock').value), expiry: document.getElementById('b-expiry').value });
+    saveLocalState(); closeModal(); buildMasterTables(); renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale'); evaluateSystemMetrics();
   };
-
-  // 3. Update the UI memory instantly so it displays on your website right away
-  if (!db.drugs) db.drugs = [];
-  db.drugs.push(newDrug);
-
-  // 4. Force a UI redrawing loop matching your system functions
-  if (typeof buildMasterTables === 'function') buildMasterTables();
-  if (typeof renderPosGrids === 'function') {
-    renderPosGrids($('#retail-search').val() || '', 'retail');
-    renderPosGrids($('#wholesale-search').val() || '', 'wholesale');
-  }
-  if (typeof evaluateApplicationStates === 'function') evaluateApplicationStates();
-
-  // 5. Instantly wipe the inputs and hide the modal panel
-  document.getElementById('modal-med-name').value = '';
-  document.getElementById('modal-med-cat').value = '';
-  document.getElementById('modal-med-price').value = '';
-  if(document.getElementById('modal-med-barcode')) document.getElementById('modal-med-barcode').value = '';
-  document.getElementById('medicine-modal').classList.add('hidden');
-
-  alert('SKU updated locally! Syncing with your Google Sheet database in the background...');
-
-  // 6. Fire off the silent background post network call to Google Sheets
-  try {
-    await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' }, 
-      body: JSON.stringify({
-        action: 'addDrug',
-        name: inputName,
-        brandName: inputName,
-        genericName: genericName,
-        category: category,
-        type: category,
-        retailPrice: price,
-        barcode: barcode
-      })
-    });
-    console.log("📡 Remote Google Spreadsheet rows written successfully.");
-  } catch (err) { 
-    console.error("Background sync failed:", err);
-    alert("Warning: Background database sync timed out. The entry is active locally but check your internet connection."); 
-  }
-});
-
-  document.getElementById('save-expense-modal').addEventListener('click', async () => {
-    const desc = document.getElementById('modal-exp-desc').value.trim();
-    const category = document.getElementById('modal-exp-cat').value;
-    const amount = parseInt(document.getElementById('modal-exp-amount').value);
-
-    if (!desc || isNaN(amount)) return alert('Validation error occurred.');
-
-    try {
-      await fetch(API_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'addExpense', desc, category, amount, user: STAFF_ROLES_LOCAL[currentStaffPin]?.name || 'Admin' })
-      });
-      toggleModal('expense-modal', false);
-      alert('Internal expense entry dispatched safely to ledger rows.');
-      await loadAndBuildSystemInterface();
-    } catch (err) { alert("Server network validation connection failure."); }
-  });
-
-  document.getElementById('save-proc-modal').addEventListener('click', async () => {
-    const supplier = document.getElementById('modal-proc-supplier').value;
-    const medName = document.getElementById('modal-proc-med').value;
-    const lot = document.getElementById('modal-proc-lot').value.trim();
-    const stock = parseInt(document.getElementById('modal-proc-qty').value);
-    const cost = parseInt(document.getElementById('modal-med-cost').value || 0);
-    const expiry = document.getElementById('modal-proc-expiry').value;
-
-    if (!lot || isNaN(stock) || !expiry) return alert('Validation Error: Target parameters must be populated.');
-
-    try {
-      await fetch(API_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'addProcurement', supplier, medName, lot, stock, cost, expiry })
-      });
-      toggleModal('procurement-modal', false);
-      alert('Consignment registered! Stock levels topped up.');
-      await loadAndBuildSystemInterface();
-    } catch (err) { alert("Network transmission failure while routing procurement record."); }
-  });
-
-  document.getElementById('audit-tbody').addEventListener('click', async (e) => {
-    if (!e.target.classList.contains('reconcile-trigger-btn')) return;
-    const name = e.target.dataset.name;
-    const input = document.querySelector(`.physical-input[data-name="${name}"]`);
-    const physicalVal = parseInt(input.value);
-    if (isNaN(physicalVal)) return alert('Action Aborted: Please supply a physical counter match record first.');
-    const varianceDelta = physicalVal - getStock(name);
-    if (varianceDelta === 0) return alert('Audit Perfect: No discrepancies exist.');
-    
-    try {
-      await fetch(API_URL, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'reconcileAudit', medName: name, variance: varianceDelta, user: STAFF_ROLES_LOCAL[currentStaffPin]?.name || 'Admin' })
-      });
-      alert(`System balance updated! Reconciliation record written out.`);
-      await loadAndBuildSystemInterface();
-    } catch (err) { alert("Network exception error during reconciliation."); }
-  });
-
-  document.getElementById('audit-tbody').addEventListener('input', (e) => {
-    if (!e.target.classList.contains('physical-input')) return;
-    const name = e.target.dataset.name;
-    const physicalVal = parseInt(e.target.value);
-    const cell = document.querySelector(`.variance-cell[data-name="${name}"]`);
-    if (isNaN(physicalVal)) { cell.textContent = '--'; cell.className = 'variance-cell'; return; }
-    const variance = physicalVal - getStock(name);
-    cell.textContent = variance === 0 ? '0' : (variance > 0 ? `+${variance}` : variance);
-    cell.className = `variance-cell pill ${variance === 0 ? 'green' : 'red'}`;
-  });
-
-  // Barcode HID USB Scanner Parser interceptor
-  let barcodeBuffer = '';
-  let lastKeyTime = Date.now();
-  window.addEventListener('keydown', (e) => {
-    const currentTime = Date.now();
-    if (currentTime - lastKeyTime > 35) barcodeBuffer = ''; 
-    lastKeyTime = currentTime;
-
-    if (e.key >= '0' && e.key <= '9') barcodeBuffer += e.key;
-    else if (e.key === 'Enter' && barcodeBuffer.length >= 4) {
-      e.preventDefault(); 
-      const identifiedDrug = db.drugs.find(d => d.barcode === barcodeBuffer || d.name === barcodeBuffer);
-      if (identifiedDrug) {
-        const activeSection = document.querySelector('.section.active')?.id;
-        handlePosSelection(identifiedDrug.name || identifiedDrug.brandName, activeSection === 'pos-wholesale' ? 'wholesale' : 'retail');
-      } else {
-        alert(`Barcode Look-up Error: Code "${barcodeBuffer}" is not mapped.`);
-      }
-      barcodeBuffer = ''; 
-    }
-  });
-
-  document.getElementById('btn-switch-shift').addEventListener('click', promptStaffLoginAndBuild);
-
-  if (currentStaffPin) bootTerminalEngine();
-  else promptStaffLoginAndBuild();
-});
-
-async function loadAndBuildSystemInterface() {
-  await refreshApplicationState();
-  buildMasterTables();
-  renderPosGrids($('#retail-search').val() || '', 'retail');
-  renderPosGrids($('#wholesale-search').val() || '', 'wholesale');
-  evaluateApplicationStates();
 }
 
-function bootTerminalEngine() {
-  enforceSecurityClearance();
-  if (currentStaffPin && STAFF_ROLES_LOCAL[currentStaffPin]) {
-    loadAndBuildSystemInterface();
-  }
+function openSupplierModal() {
+  boxModal.innerHTML = `<div class="modal-header"><h4>+ Register Supplier</h4><button onclick="closeModal()">×</button></div><form id="f-sup"><div class="form-group"><label>Vendor Legal Name</label><input type="text" id="s-name" class="form-control" required></div><div class="form-group"><label>Agent</label><input type="text" id="s-con" class="form-control" required></div><div class="form-group"><label>Phone</label><input type="text" id="s-ph" class="form-control" required></div><div class="form-group"><label>HQ Address</label><input type="text" id="s-loc" class="form-control" required></div><button type="submit" class="checkout-submit-btn">SAVE VENDOR</button></form>`;
+  containerModal.style.display = 'flex';
+  document.getElementById('f-sup').onsubmit = function(e) {
+    e.preventDefault();
+    db.suppliers.push({ name: document.getElementById('s-name').value.trim(), contact: document.getElementById('s-con').value.trim(), phone: document.getElementById('s-ph').value.trim(), location: document.getElementById('s-loc').value.trim() });
+    saveLocalState(); closeModal(); buildMasterTables();
+  };
 }
 
-function promptStaffLoginAndBuild() {
-  const pin = prompt("ENTER SECURE ENTERPRISE STAFF TERMINAL PIN:");
-  if (pin !== null) {
-    if (STAFF_ROLES_LOCAL[pin]) {
-      currentStaffPin = pin;
-      sessionStorage.setItem('medi_staff_pin', pin);
-      bootTerminalEngine();
-    } else {
-      alert("Security Alert: Invalid Staff identification authorization token rejected.");
-      promptStaffLoginAndBuild();
-    }
-  }
+function openExpenseModal() {
+  boxModal.innerHTML = `<div class="modal-header"><h4>+ File Operational Expense</h4><button onclick="closeModal()">×</button></div><form id="f-exp"><div class="form-group"><label>Statement Narrative</label><input type="text" id="e-desc" class="form-control" required></div><div class="form-group"><label>Category</label><select id="e-cat" class="form-control"><option>Utilities</option><option>NDA Licensing</option><option>Staff Payroll</option></select></div><div class="form-group"><label>Amount</label><input type="number" id="e-amt" class="form-control" required></div><button type="submit" class="checkout-submit-btn">LOG DISBURSAL</button></form>`;
+  containerModal.style.display = 'flex';
+  document.getElementById('f-exp').onsubmit = function(e) {
+    e.preventDefault();
+    db.expenses.push({ date: new Date().toLocaleDateString(), desc: document.getElementById('e-desc').value.trim(), category: document.getElementById('e-cat').value, amount: Number(document.getElementById('e-amt').value) });
+    saveLocalState(); closeModal(); buildMasterTables();
+  };
 }
+
+function attachAuditTriggers() {
+  document.querySelectorAll('.physical-input').forEach(inp => {
+    inp.oninput = function() {
+      const name = this.dataset.name; const systemVal = getStock(name); const physicalVal = Number(this.value);
+      const cell = document.getElementById(`var-${name.replace(/\s+/g, '-')}`);
+      if (!cell) return;
+      if (this.value === "") { cell.textContent = "--"; cell.className = ""; return; }
+      const diff = physicalVal - systemVal;
+      cell.textContent = (diff > 0 ? "+" : "") + diff;
+      cell.className = diff === 0 ? "text-success font-bold" : (diff > 0 ? "text-warning font-bold" : "text-danger font-bold");
+    };
+  });
+  document.querySelectorAll('.btn-reconcile').forEach(btn => {
+    btn.onclick = function() {
+      if (!checkAdminClearance()) return;
+      const name = this.dataset.name; const inp = document.querySelector(`.physical-input[data-name="${name}"]`);
+      if (!inp || inp.value === "") return alert("Enter physical count match first.");
+      db.batches = db.batches.filter(b => b.medName !== name);
+      db.batches.push({ medName: name, lot: "RECON-"+Math.floor(100+Math.random()*900), stock: Number(inp.value), expiry: new Date(Date.now() + 365*24*60*60*1000).toISOString().split('T')[0] });
+      saveLocalState(); alert("Reconciliation complete!"); buildMasterTables(); evaluateSystemMetrics(); renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale');
+    };
+  });
+}
+
+window.onload = function() {
+  loadLocalState();
+  initInterceptors();
+  
+  const defaultLink = document.querySelector('.nav-link.active');
+  if (defaultLink) handleNavigationClick(defaultLink);
+
+  try { buildMasterTables(); } catch(err) { console.warn(err); }
+  try { renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale'); } catch(err) { console.warn(err); }
+  try { evaluateSystemMetrics(); } catch(err) { console.warn(err); }
+  
+  const clock = document.getElementById('live-clock');
+  if (clock) clock.textContent = "Sat, 13 Jun 2026";
+};
