@@ -4,8 +4,6 @@
  * Updated: Drug List dynamically bound to live Google Sheets API (8 Column Array Schema)
  */
 
-const API_URL = 'https://script.google.com/macros/s/AKfycbydlhN1Hv12CJz8hFJFDNj2uKOQU_xyc65sOzNDNhQELInmc76V1EKWVIhJLrXPQWhf4A/exec';
-
 // Live System Cache State
 let db = { 
   drugs: [], 
@@ -17,6 +15,7 @@ let db = {
   sales: [] 
 };
 
+const API_URL = 'https://script.google.com/macros/s/AKfycbydlhN1Hv12CJz8hFJFDNj2uKOQU_xyc65sOzNDNhQELInmc76V1EKWVIhJLrXPQWhf4A/exec';
 let retailCart = {};
 let wholesaleCart = {};
 
