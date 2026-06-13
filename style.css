@@ -145,3 +145,385 @@ body {
     padding: 25px;
   }
 }
+const LOCAL_STORAGE_KEY = "MEDICARE_ENTERPRISE_DB";
+
+const BASE_EMPTY_STATE = {
+  drugs: [], 
+  batches: [],
+  suppliers: [],
+  customers: [
+    { name: "Joint Medical Store Ltd", type: "Wholesale" },
+    { name: "National Medical Stores (NMS)", type: "Wholesale" }
+  ],
+  expenses: [],
+  sales: []
+};
+
+let db = {};
+
+function saveLocalState() {
+  localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(db));
+}
+
+function loadLocalState() {
+  const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
+  if (!cached) {
+    db = JSON.parse(JSON.stringify(BASE_EMPTY_STATE));
+    saveLocalState();
+  } else {
+    db = JSON.parse(cached);
+  }
+}
+
+let retailCart = {};
+let wholesaleCart = {};
+let activeStaffPin = sessionStorage.getItem("medi_staff_pin") || null;
+
+function fmt(num) {
+  return "UGX " + Number(num).toLocaleString('en-US');
+}
+
+function getStock(medIdentifier) {
+  return db.batches.filter(b => b.medName === medIdentifier).reduce((acc, curr) => acc + Number(curr.stock), 0);
+}
+
+function checkAdminClearance() {
+  if (activeStaffPin === "8899") return true;
+  const challenge = prompt("🔒 SECURITY WINDOW: ENTER SECURE ADMIN TERMINAL PIN:");
+  if (challenge === "8899") {
+    activeStaffPin = "8899";
+    sessionStorage.setItem("medi_staff_pin", "8899");
+    return true;
+  }
+  alert("❌ Access Denied: Invalid PIN.");
+  return false;
+}
+
+function handleNavigationClick(targetButton) {
+  const targetId = targetButton.getAttribute('data-target');
+  if (!targetId) return;
+
+  document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+  document.querySelectorAll('.tab-view').forEach(v => v.style.display = 'none');
+  
+  targetButton.classList.add('active');
+  const targetView = document.getElementById(targetId);
+  if (targetView) {
+    targetView.style.display = 'block';
+  }
+}
+
+// REGISTER INDEPENDENT UI BUTTON INTERCEPTORS
+function initInterceptors() {
+  document.querySelectorAll('.nav-link').forEach(btn => {
+    btn.onclick = function(e) {
+      e.preventDefault();
+      handleNavigationClick(this);
+    };
+  });
+
+  const lockBtn = document.getElementById('btn-lock-terminal');
+  if (lockBtn) {
+    lockBtn.onclick = function(e) {
+      e.preventDefault();
+      activeStaffPin = null;
+      sessionStorage.removeItem("medi_staff_pin");
+      alert("🔒 Terminal admin token cleared.");
+    };
+  }
+
+  const mDrug = document.getElementById('btn-modal-drug');
+  if (mDrug) mDrug.onclick = function() { if(checkAdminClearance()) openDrugModal(); };
+
+  const mProc = document.getElementById('btn-modal-proc');
+  if (mProc) mProc.onclick = function() { if(checkAdminClearance()) openProcurementModal(); };
+
+  const mSup = document.getElementById('btn-modal-supplier');
+  if (mSup) mSup.onclick = function() { if(checkAdminClearance()) openSupplierModal(); };
+
+  const mExp = document.getElementById('btn-modal-expense');
+  if (mExp) mExp.onclick = function() { if(checkAdminClearance()) openExpenseModal(); };
+
+  const checkRet = document.getElementById('btn-checkout-retail');
+  if (checkRet) checkRet.onclick = function() { finalizeTransaction('retail'); };
+
+  const checkWholesale = document.getElementById('btn-checkout-wholesale');
+  if (checkWholesale) checkWholesale.onclick = function() { finalizeTransaction('wholesale'); };
+  
+  const rSearch = document.getElementById('retail-search');
+  if (rSearch) rSearch.oninput = function() { renderPosGrids(this.value, 'retail'); };
+  
+  const wSearch = document.getElementById('wholesale-search');
+  if (wSearch) wSearch.oninput = function() { renderPosGrids(this.value, 'wholesale'); };
+}
+
+function buildMasterTables() {
+  const sHistory = document.getElementById('sales-history-tbody');
+  if (sHistory) {
+    sHistory.innerHTML = db.sales.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:var(--muted);">No sales recorded.</td></tr>' : 
+    db.sales.map(s => `<tr><td><b>${s.receipt}</b></td><td>${s.time}</td><td>${s.customer}</td><td>${s.itemCount} Units</td><td><b>${fmt(s.total)}</b></td><td><span class="pill ${s.type === 'Retail' ? 'green' : 'amber'}">${s.type}</span></td></tr>`).reverse().join('');
+  }
+
+  const sReport = document.getElementById('stock-report-tbody');
+  if (sReport) {
+    sReport.innerHTML = db.drugs.length === 0 ? '<tr><td colspan="7" style="text-align:center;color:var(--muted);">No drugs found.</td></tr>' : 
+    db.drugs.map((d, i) => `<tr><td>${i+1}</td><td><b>${d.brandName}</b></td><td>${d.genericName}</td><td><span class="badge">${d.category}</span></td><td>${fmt(d.costPrice)}</td><td>${fmt(d.wholesalePrice)}</td><td class="text-success font-bold">${fmt(d.retailPrice)}</td></tr>`).join('');
+  }
+
+  const expiryT = document.getElementById('expiry-tbody');
+  if (expiryT) {
+    expiryT.innerHTML = db.batches.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No tracked batches.</td></tr>' : 
+    db.batches.map(b => `<tr><td>${b.medName}</td><td><code>${b.lot}</code></td><td><b>${b.stock} units</b></td><td>${b.expiry}</td><td><span class="pill green">Active</span></td></tr>`).join('');
+  }
+
+  const auditT = document.getElementById('audit-tbody');
+  if (auditT) {
+    auditT.innerHTML = db.drugs.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No items to audit.</td></tr>' : 
+    db.drugs.map(d => `<tr><td>${d.brandName}</td><td><code>${getStock(d.brandName)} units</code></td><td><input type="number" class="form-control physical-input" data-name="${d.brandName}" placeholder="Count" style="width:100px;"></td><td id="var-${d.brandName.replace(/\s+/g, '-')}">--</td><td><button class="action-btn btn-reconcile" data-name="${d.brandName}">Match</button></td></tr>`).join('');
+    attachAuditTriggers();
+  }
+
+  const supT = document.getElementById('suppliers-tbody');
+  if (supT) {
+    supT.innerHTML = db.suppliers.length === 0 ? '<tr><td colspan="4" style="text-align:center;color:var(--muted);">No suppliers registered.</td></tr>' : 
+    db.suppliers.map(s => `<tr><td><b>${s.name}</b></td><td>${s.contact}</td><td>${s.phone}</td><td>${s.location}</td></tr>`).join('');
+  }
+
+  const expT = document.getElementById('expenditures-tbody');
+  if (expT) {
+    expT.innerHTML = db.expenses.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--muted);">No expenses filed.</td></tr>' : 
+    db.expenses.map(e => `<tr><td>${e.date}</td><td>${e.desc}</td><td><span class="pill amber">${e.category}</span></td><td><b>${fmt(e.amount)}</b></td><td>Admin</td></tr>`).join('');
+  }
+
+  const cSel = document.getElementById('wholesale-client-select');
+  if (cSel) cSel.innerHTML = db.customers.map(c => `<option value="${c.name}">${c.name}</option>`).join('');
+}
+
+function renderPosGrids(q = '', type = 'retail') {
+  const container = document.getElementById(type === 'retail' ? 'retail-drug-grid' : 'wholesale-drug-grid');
+  if (!container) return;
+  const filtered = db.drugs.filter(d => d.brandName.toLowerCase().includes(q.toLowerCase()));
+  if (filtered.length === 0) {
+    container.innerHTML = `<div style="padding:20px;color:var(--muted);font-size:12px;">No products match query.</div>`;
+    return;
+  }
+  container.innerHTML = filtered.map(d => `
+    <div class="drug-card" data-name="${d.brandName}" data-type="${type}">
+      <div><b>${d.brandName}</b><br><small style="color:var(--muted);">${d.genericName}</small></div>
+      <div style="color:var(--sage);font-weight:bold;margin-top:8px;">${fmt(type==='retail'?d.retailPrice:d.wholesalePrice)}</div>
+      <div style="font-size:11px;color:var(--muted);">Stock: ${getStock(d.brandName)} u</div>
+    </div>
+  `).join('');
+
+  container.querySelectorAll('.drug-card').forEach(card => {
+    card.onclick = function() {
+      addItemToCart(this.dataset.name, this.dataset.type);
+    };
+  });
+}
+
+function addItemToCart(name, type) {
+  const cart = type === 'retail' ? retailCart : wholesaleCart;
+  if (getStock(name) <= (cart[name] || 0)) return alert("Out of physical inventory bounds.");
+  cart[name] = (cart[name] || 0) + 1;
+  syncCartView(type);
+}
+
+function adjustQty(name, type, delta) {
+  const cart = type === 'retail' ? retailCart : wholesaleCart;
+  cart[name] += delta;
+  if (cart[name] <= 0) delete cart[name];
+  syncCartView(type);
+}
+
+function syncCartView(type) {
+  const cart = type === 'retail' ? retailCart : wholesaleCart;
+  const container = document.getElementById(type === 'retail' ? 'retail-cart-items' : 'wholesale-cart-items');
+  const totalEl = document.getElementById(type === 'retail' ? 'retail-total' : 'wholesale-total');
+  const subEl = document.getElementById(type === 'retail' ? 'retail-subtotal' : 'wholesale-subtotal');
+  
+  const keys = Object.keys(cart);
+  if (!keys.length) {
+    container.innerHTML = `<div style="text-align:center;padding:20px;color:var(--muted);">Basket clear.</div>`;
+    if(totalEl) totalEl.textContent = fmt(0); 
+    if(subEl) subEl.textContent = fmt(0);
+    return;
+  }
+
+  let total = 0;
+  container.innerHTML = keys.map(k => {
+    const d = db.drugs.find(i => i.brandName === k);
+    const price = type === 'retail' ? d.retailPrice : d.wholesalePrice;
+    total += price * cart[k];
+    return `<div class="cart-item"><span>${k}</span><div class="cart-qty"><button class="min-q" data-name="${k}">-</button><b>${cart[k]}</b><button class="add-q" data-name="${k}">+</button></div><span>${fmt(price*cart[k])}</span></div>`;
+  }).join('');
+  
+  container.querySelectorAll('.min-q').forEach(b => b.onclick = function() { adjustQty(this.dataset.name, type, -1); });
+  container.querySelectorAll('.add-q').forEach(b => b.onclick = function() { adjustQty(this.dataset.name, type, 1); });
+
+  if(totalEl) totalEl.textContent = fmt(total);
+  if(subEl) subEl.textContent = fmt(total);
+}
+
+function finalizeTransaction(type) {
+  const cart = type === 'retail' ? retailCart : wholesaleCart;
+  const keys = Object.keys(cart);
+  if (!keys.length) return alert("Cart is empty.");
+
+  let total = 0; let count = 0;
+  keys.forEach(k => {
+    const d = db.drugs.find(i => i.brandName === k);
+    total += (type === 'retail' ? d.retailPrice : d.wholesalePrice) * cart[k];
+    count += cart[k];
+    let rem = cart[k];
+    for (let b of db.batches) {
+      if (b.medName === k && b.stock > 0) {
+        if (b.stock >= rem) { b.stock -= rem; rem = 0; break; }
+        else { rem -= b.stock; b.stock = 0; }
+      }
+    }
+  });
+
+  const txData = { 
+    receipt: "TX-"+Math.floor(100000+Math.random()*900000), 
+    time: new Date().toLocaleString(), 
+    customer: type === 'retail'?'Walk-in Client':(document.getElementById('wholesale-client-select')?.value || 'Wholesale Client'), 
+    itemCount: count, 
+    total: total, 
+    type: type==='retail'?'Retail':'Wholesale',
+    cartDetails: { ...cart }
+  };
+
+  db.sales.push(txData);
+  saveLocalState();
+  if (type === 'retail') { retailCart = {}; syncCartView('retail'); } else { wholesaleCart = {}; syncCartView('wholesale'); }
+  
+  spoolHardwareReceipt(txData);
+  evaluateSystemMetrics(); buildMasterTables(); renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale');
+}
+
+function spoolHardwareReceipt(tx) {
+  let printContainer = document.getElementById('receipt-hardware-spooler');
+  if (!printContainer) {
+    printContainer = document.createElement('div');
+    printContainer.id = 'receipt-hardware-spooler';
+    printContainer.style.display = 'none';
+    document.body.appendChild(printContainer);
+  }
+
+  let linesHtml = "";
+  for (let name in tx.cartDetails) {
+    const qty = tx.cartDetails[name];
+    const d = db.drugs.find(item => item.brandName === name);
+    const basePrice = tx.type === 'Retail' ? d.retailPrice : d.wholesalePrice;
+    linesHtml += `<tr><td>${name} (${qty}x)</td><td style="text-align:right;">${fmt(basePrice * qty)}</td></tr>`;
+  }
+
+  printContainer.innerHTML = `
+    <div style="font-family:monospace;padding:20px;color:#000;">
+      <h3 style="text-align:center;">MEDICARE PLUS</h3>
+      <hr>
+      <p>ID: ${tx.receipt}</p>
+      <p>Date: ${tx.time}</p>
+      <table style="width:100%;">${linesHtml}</table>
+      <hr>
+      <h4>Total Paid: ${fmt(tx.total)}</h4>
+    </div>
+  `;
+  window.print();
+}
+
+function evaluateSystemMetrics() {
+  const turnoverEl = document.getElementById('kpi-turnover');
+  const txCountEl = document.getElementById('kpi-tx-count');
+  const expCountEl = document.getElementById('kpi-expiry-count');
+  const varCountEl = document.getElementById('kpi-variance-count');
+
+  if(turnoverEl) turnoverEl.textContent = fmt(db.sales.reduce((a,c)=>a+c.total,0));
+  if(txCountEl) txCountEl.textContent = `${db.sales.length} Transactions`;
+  if(expCountEl) expCountEl.textContent = `${db.batches.filter(b=>b.stock>0).length} Lots`;
+  if(varCountEl) varCountEl.textContent = `${db.drugs.filter(d=>getStock(d.brandName)===0).length} Out of Stock`;
+}
+
+const containerModal = document.getElementById('modal-container');
+const boxModal = document.getElementById('modal-box');
+window.closeModal = function() { containerModal.style.display = 'none'; };
+
+function openDrugModal() {
+  boxModal.innerHTML = `<div class="modal-header"><h4>+ Add Variant SKU</h4><button onclick="closeModal()">×</button></div><form id="f-drug"><div class="form-group"><label>Brand Name</label><input type="text" id="m-brand" class="form-control" required></div><div class="form-group"><label>Generic Name</label><input type="text" id="m-generic" class="form-control" required></div><div class="form-group"><label>Category</label><select id="m-cat" class="form-control"><option>Tablets</option><option>Syrup</option></select></div><div class="form-group"><label>Cost Price</label><input type="number" id="m-cost" class="form-control" required></div><div class="form-group"><label>Wholesale Price</label><input type="number" id="m-wholesale" class="form-control" required></div><div class="form-group"><label>Retail Price</label><input type="number" id="m-retail" class="form-control" required></div><button type="submit" class="checkout-submit-btn">SAVE</button></form>`;
+  containerModal.style.display = 'flex';
+  document.getElementById('f-drug').onsubmit = function(e) {
+    e.preventDefault();
+    db.drugs.push({ brandName: document.getElementById('m-brand').value.trim(), genericName: document.getElementById('m-generic').value.trim(), category: document.getElementById('m-cat').value, costPrice: Number(document.getElementById('m-cost').value), wholesalePrice: Number(document.getElementById('m-wholesale').value), retailPrice: Number(document.getElementById('m-retail').value) });
+    saveLocalState(); closeModal(); buildMasterTables(); renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale'); evaluateSystemMetrics();
+  };
+}
+
+function openProcurementModal() {
+  boxModal.innerHTML = `<div class="modal-header"><h4>+ Record Supply Consignment</h4><button onclick="closeModal()">×</button></div><form id="f-batch"><div class="form-group"><label>Select Variant</label><select id="b-name" class="form-control">${db.drugs.map(d=>`<option value="${d.brandName}">${d.brandName}</option>`).join('')}</select></div><div class="form-group"><label>Lot Code</label><input type="text" id="b-lot" class="form-control" required></div><div class="form-group"><label>Quantity</label><input type="number" id="b-stock" class="form-control" required></div><div class="form-group"><label>Expiry Date</label><input type="date" id="b-expiry" class="form-control" required></div><button type="submit" class="checkout-submit-btn">LOG BATCH</button></form>`;
+  containerModal.style.display = 'flex';
+  document.getElementById('f-batch').onsubmit = function(e) {
+    e.preventDefault();
+    db.batches.push({ medName: document.getElementById('b-name').value, lot: document.getElementById('b-lot').value.trim(), stock: Number(document.getElementById('b-stock').value), expiry: document.getElementById('b-expiry').value });
+    saveLocalState(); closeModal(); buildMasterTables(); renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale'); evaluateSystemMetrics();
+  };
+}
+
+function openSupplierModal() {
+  boxModal.innerHTML = `<div class="modal-header"><h4>+ Register Supplier</h4><button onclick="closeModal()">×</button></div><form id="f-sup"><div class="form-group"><label>Vendor Legal Name</label><input type="text" id="s-name" class="form-control" required></div><div class="form-group"><label>Agent</label><input type="text" id="s-con" class="form-control" required></div><div class="form-group"><label>Phone</label><input type="text" id="s-ph" class="form-control" required></div><div class="form-group"><label>HQ Address</label><input type="text" id="s-loc" class="form-control" required></div><button type="submit" class="checkout-submit-btn">SAVE VENDOR</button></form>`;
+  containerModal.style.display = 'flex';
+  document.getElementById('f-sup').onsubmit = function(e) {
+    e.preventDefault();
+    db.suppliers.push({ name: document.getElementById('s-name').value.trim(), contact: document.getElementById('s-con').value.trim(), phone: document.getElementById('s-ph').value.trim(), location: document.getElementById('s-loc').value.trim() });
+    saveLocalState(); closeModal(); buildMasterTables();
+  };
+}
+
+function openExpenseModal() {
+  boxModal.innerHTML = `<div class="modal-header"><h4>+ File Operational Expense</h4><button onclick="closeModal()">×</button></div><form id="f-exp"><div class="form-group"><label>Statement Narrative</label><input type="text" id="e-desc" class="form-control" required></div><div class="form-group"><label>Category</label><select id="e-cat" class="form-control"><option>Utilities</option><option>NDA Licensing</option><option>Staff Payroll</option></select></div><div class="form-group"><label>Amount</label><input type="number" id="e-amt" class="form-control" required></div><button type="submit" class="checkout-submit-btn">LOG DISBURSAL</button></form>`;
+  containerModal.style.display = 'flex';
+  document.getElementById('f-exp').onsubmit = function(e) {
+    e.preventDefault();
+    db.expenses.push({ date: new Date().toLocaleDateString(), desc: document.getElementById('e-desc').value.trim(), category: document.getElementById('e-cat').value, amount: Number(document.getElementById('e-amt').value) });
+    saveLocalState(); closeModal(); buildMasterTables();
+  };
+}
+
+function attachAuditTriggers() {
+  document.querySelectorAll('.physical-input').forEach(inp => {
+    inp.oninput = function() {
+      const name = this.dataset.name; const systemVal = getStock(name); const physicalVal = Number(this.value);
+      const cell = document.getElementById(`var-${name.replace(/\s+/g, '-')}`);
+      if (!cell) return;
+      if (this.value === "") { cell.textContent = "--"; cell.className = ""; return; }
+      const diff = physicalVal - systemVal;
+      cell.textContent = (diff > 0 ? "+" : "") + diff;
+      cell.className = diff === 0 ? "text-success font-bold" : (diff > 0 ? "text-warning font-bold" : "text-danger font-bold");
+    };
+  });
+  document.querySelectorAll('.btn-reconcile').forEach(btn => {
+    btn.onclick = function() {
+      if (!checkAdminClearance()) return;
+      const name = this.dataset.name; const inp = document.querySelector(`.physical-input[data-name="${name}"]`);
+      if (!inp || inp.value === "") return alert("Enter physical count match first.");
+      db.batches = db.batches.filter(b => b.medName !== name);
+      db.batches.push({ medName: name, lot: "RECON-"+Math.floor(100+Math.random()*900), stock: Number(inp.value), expiry: new Date(Date.now() + 365*24*60*60*1000).toISOString().split('T')[0] });
+      saveLocalState(); alert("Reconciliation complete!"); buildMasterTables(); evaluateSystemMetrics(); renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale');
+    };
+  });
+}
+
+window.onload = function() {
+  loadLocalState();
+  initInterceptors();
+  
+  const defaultLink = document.querySelector('.nav-link.active');
+  if (defaultLink) handleNavigationClick(defaultLink);
+
+  try { buildMasterTables(); } catch(err) { console.warn(err); }
+  try { renderPosGrids('', 'retail'); renderPosGrids('', 'wholesale'); } catch(err) { console.warn(err); }
+  try { evaluateSystemMetrics(); } catch(err) { console.warn(err); }
+  
+  const clock = document.getElementById('live-clock');
+  if (clock) clock.textContent = "Sat, 13 Jun 2026";
+};
