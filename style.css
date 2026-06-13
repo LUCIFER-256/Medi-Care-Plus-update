@@ -1,0 +1,147 @@
+/* Core Layout Global Ruleset Overwrites */
+:root {
+  --bg: #121212;
+  --surface: #1e1e1e;
+  --border: #2d2d2d;
+  --text: #e0e0e0;
+  --muted: #888888;
+  --primary: #4caf50;
+  --primary-dark: #388e3c;
+  --sage: #81c784;
+  --accent: #ff9800;
+  --danger: #d9534f;
+  --font-stack: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-stack);
+  background-color: var(--bg);
+  color: var(--text);
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Sidebar and Navigation Item Geometry Layout Framework */
+.sidebar {
+  width: 260px;
+  background-color: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.nav-menu {
+  padding: 16px 0;
+  flex-grow: 1;
+  overflow-y: auto;
+}
+
+.nav-item {
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.nav-item:hover {
+  color: var(--text);
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+.nav-item.active {
+  color: var(--primary);
+  background-color: rgba(76, 175, 80, 0.08);
+  border-left: 3px solid var(--primary);
+}
+
+/* Application Viewport Workspace Layout Controllers */
+.main-viewport {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.view-content-wrapper {
+  flex-grow: 1;
+  padding: 32px;
+  overflow-y: auto;
+}
+
+/* Content Data Grid Elements Layout */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 13px;
+}
+
+.data-table th {
+  padding: 12px 16px;
+  background-color: rgba(255, 255, 255, 0.01);
+  border-bottom: 2px solid var(--border);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.data-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+/* POS Terminal Layout Flow Splitters */
+.pos-layout-split {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 24px;
+  height: calc(100vh - 128px);
+}
+
+.cards-grid-scroll {
+  flex-grow: 1;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 14px;
+  padding-right: 4px;
+}
+
+/* Local Hardware Printing Media Isolation */
+.receipt-print-wrapper {
+  display: none;
+}
+
+@media print {
+  body * {
+    display: none !important;
+  }
+  #receipt-hardware-spooler, #receipt-hardware-spooler * {
+    display: block !important;
+  }
+  #receipt-hardware-spooler {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    background: #fff !important;
+    color: #000 !important;
+    font-family: monospace;
+    padding: 25px;
+  }
+}
